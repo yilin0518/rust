@@ -1,0 +1,5 @@
+package.name = "core"
+
+[tag.ValidPtr]
+args = [ "p", "T", "len" ]
+desc = "pointer `{p}` must be valid for reading and writing the `sizeof({T})*{len}` memory from it"
