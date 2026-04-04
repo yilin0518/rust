@@ -807,7 +807,6 @@ pub const unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
 #[allow(unconditional_recursion)]
 #[rustc_diagnostic_item = "ptr_drop_in_place"]
 #[rustc_const_unstable(feature = "const_drop_in_place", issue = "109342")]
-#[safety::requires(ValidPtr(to_drop, T, 1))]
 pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
 where
     T: [const] Destruct,
@@ -1302,8 +1301,6 @@ pub const fn slice_from_raw_parts_mut<T>(data: *mut T, len: usize) -> *mut [T] {
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_stable(feature = "const_swap", since = "1.85.0")]
 #[rustc_diagnostic_item = "ptr_swap"]
-#[safety::requires(ValidPtr(x, T, 1))]
-#[safety::requires(ValidPtr(y, T, 1))]
 pub const unsafe fn swap<T>(x: *mut T, y: *mut T) {
     // Give ourselves some scratch space to work with.
     // We do not have to worry about drops: `MaybeUninit` does nothing when dropped.
@@ -1368,8 +1365,6 @@ pub const unsafe fn swap<T>(x: *mut T, y: *mut T) {
 #[rustc_diagnostic_item = "ptr_swap_nonoverlapping"]
 #[rustc_allow_const_fn_unstable(const_eval_select)] // both implementations behave the same
 #[track_caller]
-#[safety::requires(ValidPtr(x, T, count))]
-#[safety::requires(ValidPtr(y, T, count))]
 pub const unsafe fn swap_nonoverlapping<T>(x: *mut T, y: *mut T, count: usize) {
     ub_checks::assert_unsafe_precondition!(
         check_library_ub,
@@ -1549,7 +1544,6 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, bytes: NonZero<usize
 #[rustc_const_stable(feature = "const_replace", since = "1.83.0")]
 #[rustc_diagnostic_item = "ptr_replace"]
 #[track_caller]
-#[safety::requires(ValidPtr(dst, T, 1))]
 pub const unsafe fn replace<T>(dst: *mut T, src: T) -> T {
     // SAFETY: the caller must guarantee that `dst` is valid to be
     // cast to a mutable reference (valid for writes, aligned, initialized),
@@ -1685,7 +1679,6 @@ pub const unsafe fn replace<T>(dst: *mut T, src: T) -> T {
 #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
 #[track_caller]
 #[rustc_diagnostic_item = "ptr_read"]
-#[safety::requires(ValidPtr(src, T, 1))]
 pub const unsafe fn read<T>(src: *const T) -> T {
     // It would be semantically correct to implement this via `copy_nonoverlapping`
     // and `MaybeUninit`, as was done before PR #109035. Calling `assume_init`
@@ -1804,7 +1797,7 @@ pub const unsafe fn read<T>(src: *const T) -> T {
 #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
 #[track_caller]
 #[rustc_diagnostic_item = "ptr_read_unaligned"]
-#[safety::requires(ValidPtr(src, T, 1))]
+#[safety::requires(ValidPtrRead(src, T, 1), Init(src, T))]
 pub const unsafe fn read_unaligned<T>(src: *const T) -> T {
     let mut tmp = MaybeUninit::<T>::uninit();
     // SAFETY: the caller must guarantee that `src` is valid for reads.
@@ -1903,7 +1896,6 @@ pub const unsafe fn read_unaligned<T>(src: *const T) -> T {
 #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
 #[rustc_diagnostic_item = "ptr_write"]
 #[track_caller]
-#[safety::requires(ValidPtr(dst, T, 1))]
 pub const unsafe fn write<T>(dst: *mut T, src: T) {
     // Semantically, it would be fine for this to be implemented as a
     // `copy_nonoverlapping` and appropriate drop suppression of `src`.
@@ -2008,7 +2000,6 @@ pub const unsafe fn write<T>(dst: *mut T, src: T) {
 #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
 #[rustc_diagnostic_item = "ptr_write_unaligned"]
 #[track_caller]
-#[safety::requires(ValidPtr(dst, T, 1))]
 pub const unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
     // SAFETY: the caller must guarantee that `dst` is valid for writes.
     // `dst` cannot overlap `src` because the caller has mutable access
@@ -2091,7 +2082,6 @@ pub const unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 #[stable(feature = "volatile", since = "1.9.0")]
 #[track_caller]
 #[rustc_diagnostic_item = "ptr_read_volatile"]
-#[safety::requires(ValidPtr(src, T, 1))]
 pub unsafe fn read_volatile<T>(src: *const T) -> T {
     // SAFETY: the caller must uphold the safety contract for `volatile_load`.
     unsafe {
@@ -2179,7 +2169,6 @@ pub unsafe fn read_volatile<T>(src: *const T) -> T {
 #[stable(feature = "volatile", since = "1.9.0")]
 #[rustc_diagnostic_item = "ptr_write_volatile"]
 #[track_caller]
-#[safety::requires(ValidPtr(dst, T, 1))]
 pub unsafe fn write_volatile<T>(dst: *mut T, src: T) {
     // SAFETY: the caller must uphold the safety contract for `volatile_store`.
     unsafe {

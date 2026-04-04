@@ -834,12 +834,14 @@ fn doc_std(
         cmd.arg(builder.src.join("library/core/src"));
         cmd.arg("--doc-root");
         cmd.arg(out);
-        cmd.arg("--sp-file");
-        if let Some(sp_file) = env::var_os("SAFETY_TOOL_SP_FILE") {
-            cmd.arg(sp_file);
+        cmd.arg("--safety-spec");
+        if let Some(spec_path) = env::var_os("SAFETY_SPEC") {
+            cmd.arg(spec_path);
         } else {
             cmd.arg(builder.src.join("src/tools/safety-tool/assets/sp-core.toml"));
         }
+        cmd.arg("--documenting-crate");
+        cmd.arg("core");
         cmd.run(builder);
     }
 }

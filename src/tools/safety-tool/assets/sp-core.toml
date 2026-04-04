@@ -1,5 +1,9 @@
 package.name = "core"
 
-[tag.ValidPtr]
+[tag.ValidPtrRead]
 args = [ "p", "T", "len" ]
-desc = "pointer `{p}` must be valid for reading and writing the `sizeof({T})*{len}` memory from it"
+desc = "pointer `{p}` must be [valid](@mod:ptr#safety) for reading the `sizeof({T})*{len}` memory from it."
+
+[tag.Init]
+args = [ "p", "T" ]
+desc = "`{p}` must point to a properly initialized value of type `{T}`."
