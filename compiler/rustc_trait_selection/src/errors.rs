@@ -442,9 +442,11 @@ impl Subdiagnostic for RegionOriginNote<'_> {
                 label_or_note(diag, span, msg);
             }
             RegionOriginNote::WithName { span, msg, name, continues } => {
-                diag.arg("name", name);
-                diag.arg("continues", continues);
-                label_or_note(diag, span, msg);
+                label_or_note(
+                    diag,
+                    span,
+                    msg.arg("name", name).arg("continues", continues).format(),
+                );
             }
             RegionOriginNote::WithRequirement {
                 span,
@@ -607,7 +609,7 @@ impl Subdiagnostic for AddLifetimeParamsSuggestion<'_> {
                     match self.tcx.parent_hir_node(self.tcx.local_def_id_to_hir_id(anon_reg.scope))
                     {
                         hir::Node::Item(hir::Item {
-                            kind: hir::ItemKind::Trait(_, _, _, _, generics, ..),
+                            kind: hir::ItemKind::Trait(_, _, _, _, _, generics, ..),
                             ..
                         })
                         | hir::Node::Item(hir::Item {

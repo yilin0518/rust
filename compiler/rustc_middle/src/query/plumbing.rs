@@ -99,12 +99,11 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
 
     pub will_cache_on_disk_for_key_fn: fn(key: C::Key) -> bool,
 
-    pub try_load_from_disk_fn: fn(
-        tcx: TyCtxt<'tcx>,
-        key: C::Key,
-        prev_index: SerializedDepNodeIndex,
-        index: DepNodeIndex,
-    ) -> Option<C::Value>,
+    /// Function pointer that tries to load a query value from disk.
+    ///
+    /// This should only be called after a successful check of `will_cache_on_disk_for_key_fn`.
+    pub try_load_from_disk_fn:
+        fn(tcx: TyCtxt<'tcx>, prev_index: SerializedDepNodeIndex) -> Option<C::Value>,
 
     /// Function pointer that hashes this query's result values.
     ///
@@ -461,30 +460,6 @@ macro_rules! define_callbacks {
                     $(
                         TaggedQueryKey::$name(key) =>
                             $crate::query::QueryKey::default_span(key, tcx),
-                    )*
-                }
-            }
-
-            pub fn def_kind(&self, tcx: TyCtxt<'tcx>) -> Option<DefKind> {
-                // This is used to reduce code generation as it
-                // can be reused for queries with the same key type.
-                fn inner<'tcx>(key: &impl $crate::query::QueryKey, tcx: TyCtxt<'tcx>)
-                    -> Option<DefKind>
-                {
-                    key
-                        .key_as_def_id()
-                        .and_then(|def_id| def_id.as_local())
-                        .map(|def_id| tcx.def_kind(def_id))
-                }
-
-                if let TaggedQueryKey::def_kind(..) = self {
-                    // Try to avoid infinite recursion.
-                    return None
-                }
-
-                match self {
-                    $(
-                        TaggedQueryKey::$name(key) => inner(key, tcx),
                     )*
                 }
             }

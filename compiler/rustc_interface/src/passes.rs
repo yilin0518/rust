@@ -22,7 +22,7 @@ use rustc_hir::def_id::{LOCAL_CRATE, StableCrateId, StableCrateIdMap};
 use rustc_hir::definitions::Definitions;
 use rustc_hir::limit::Limit;
 use rustc_hir::lints::DelayedLint;
-use rustc_hir::{Attribute, MaybeOwner, find_attr};
+use rustc_hir::{Attribute, MaybeOwner, Target, find_attr};
 use rustc_incremental::setup_dep_graph;
 use rustc_lint::{
     BufferedEarlyLint, DecorateAttrLint, EarlyCheckNode, LintStore, unerased_lint_store,
@@ -119,10 +119,11 @@ impl LintStoreExpand for LintStoreExpandImpl<'_> {
         features: &Features,
         registered_tools: &RegisteredTools,
         node_id: ast::NodeId,
+        attrs: &[ast::Attribute],
         items: &[Box<ast::Item>],
         name: Symbol,
     ) {
-        pre_expansion_lint(sess, features, self.0, registered_tools, (node_id, items), name);
+        pre_expansion_lint(sess, features, self.0, registered_tools, (node_id, attrs, items), name);
     }
 }
 
@@ -1036,7 +1037,7 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
                         tcx.emit_node_span_lint(
                             attribute_lint.lint_id.lint,
                             attribute_lint.id,
-                            attribute_lint.span,
+                            attribute_lint.span.clone(),
                             DecorateAttrLint {
                                 sess: tcx.sess,
                                 tcx: Some(tcx),
@@ -1053,6 +1054,10 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
 /// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
 /// This function never fails.
 fn run_required_analyses(tcx: TyCtxt<'_>) {
+    // Forces all delayed owners to be lowered and drops AST crate after it.
+    // Also refetches hir_crate_items to prevent multiple threads from blocking on it later.
+    tcx.force_delayed_owners_lowering();
+
     if tcx.sess.opts.unstable_opts.input_stats {
         rustc_passes::input_stats::print_hir_stats(tcx);
     }
@@ -1060,11 +1065,6 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
     // is not defined. So we need to cfg it out.
     #[cfg(all(not(doc), debug_assertions))]
     rustc_passes::hir_id_validator::check_crate(tcx);
-
-    // Prefetch this to prevent multiple threads from blocking on it later.
-    // This is needed since the `hir_id_validator::check_crate` call above is not guaranteed
-    // to use `hir_crate_items`.
-    tcx.ensure_done().hir_crate_items(());
 
     let sess = tcx.sess;
     sess.time("misc_checking_1", || {
@@ -1273,7 +1273,7 @@ pub(crate) fn start_codegen<'tcx>(
     // Don't run this test assertions when not doing codegen. Compiletest tries to build
     // build-fail tests in check mode first and expects it to not give an error in that case.
     if tcx.sess.opts.output_types.should_codegen() {
-        rustc_symbol_mangling::test::report_symbol_names(tcx);
+        rustc_symbol_mangling::test::dump_symbol_names_and_def_paths(tcx);
     }
 
     // Don't do code generation if there were any errors. Likewise if
@@ -1369,9 +1369,10 @@ pub(crate) fn parse_crate_name(
         AttributeParser::parse_limited_should_emit(
             sess,
             attrs,
-            sym::crate_name,
+            &[sym::crate_name],
             DUMMY_SP,
             rustc_ast::node_id::CRATE_NODE_ID,
+            Target::Crate,
             None,
             emit_errors,
         )?
@@ -1418,9 +1419,10 @@ pub fn collect_crate_types(
             AttributeParser::<Early>::parse_limited_should_emit(
                 session,
                 attrs,
-                sym::crate_type,
+                &[sym::crate_type],
                 crate_span,
                 CRATE_NODE_ID,
+                Target::Crate,
                 None,
                 ShouldEmit::EarlyFatal { also_emit_lints: false },
             )
@@ -1474,9 +1476,10 @@ fn get_recursion_limit(krate_attrs: &[ast::Attribute], sess: &Session) -> Limit 
     let attr = AttributeParser::parse_limited_should_emit(
         sess,
         &krate_attrs,
-        sym::recursion_limit,
+        &[sym::recursion_limit],
         DUMMY_SP,
         rustc_ast::node_id::CRATE_NODE_ID,
+        Target::Crate,
         None,
         // errors are fatal here, but lints aren't.
         // If things aren't fatal we continue, and will parse this again.

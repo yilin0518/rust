@@ -27,8 +27,15 @@ impl<S: Stage> SingleAttributeParser<S> for IgnoreParser {
                     };
                     Some(str_value)
                 }
-                ArgParser::List(_) => {
-                    cx.adcx().warn_ill_formed_attribute_input(ILL_FORMED_ATTRIBUTE_INPUT);
+                ArgParser::List(list) => {
+                    let help = list.single().and_then(|item| item.meta_item()).and_then(|item| {
+                        item.args().no_args().ok()?;
+                        Some(item.path().to_string())
+                    });
+                    cx.adcx().warn_ill_formed_attribute_input_with_help(
+                        ILL_FORMED_ATTRIBUTE_INPUT,
+                        help,
+                    );
                     return None;
                 }
             },
@@ -65,7 +72,7 @@ impl<S: Stage> SingleAttributeParser<S> for ShouldPanicParser {
                 }
                 ArgParser::List(list) => {
                     let Some(single) = list.single() else {
-                        cx.adcx().expected_single_argument(list.span);
+                        cx.adcx().expected_single_argument(list.span, list.len());
                         return None;
                     };
                     let Some(single) = single.meta_item() else {
@@ -143,7 +150,7 @@ impl<S: Stage> SingleAttributeParser<S> for RustcAbiParser {
 
         let Some(arg) = args.single() else {
             let attr_span = cx.attr_span;
-            cx.adcx().expected_single_argument(attr_span);
+            cx.adcx().expected_single_argument(attr_span, args.len());
             return None;
         };
 
@@ -201,19 +208,10 @@ impl<S: Stage> SingleAttributeParser<S> for TestRunnerParser {
     const TEMPLATE: AttributeTemplate = template!(List: &["path"]);
 
     fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser) -> Option<AttributeKind> {
-        let Some(list) = args.list() else {
-            let attr_span = cx.attr_span;
-            cx.adcx().expected_list(attr_span, args);
-            return None;
-        };
-
-        let Some(single) = list.single() else {
-            cx.adcx().expected_single_argument(list.span);
-            return None;
-        };
+        let single = cx.single_element_list(args, cx.attr_span)?;
 
         let Some(meta) = single.meta_item() else {
-            cx.adcx().unexpected_literal(single.span());
+            cx.adcx().expected_not_literal(single.span());
             return None;
         };
 
