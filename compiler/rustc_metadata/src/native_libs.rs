@@ -19,7 +19,7 @@ use rustc_session::cstore::{
 use rustc_session::search_paths::PathKind;
 use rustc_span::Symbol;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
-use rustc_target::spec::{Abi, Arch, BinaryFormat, Env, LinkSelfContainedComponents, Os};
+use rustc_target::spec::{Arch, BinaryFormat, CfgAbi, Env, LinkSelfContainedComponents, Os};
 
 use crate::errors;
 
@@ -73,14 +73,14 @@ pub fn walk_native_lib_search_dirs<R>(
     // FIXME: On AIX this also has the side-effect of making the list of library search paths
     // non-empty, which is needed or the linker may decide to record the LIBPATH env, if
     // defined, as the search path instead of appending the default search paths.
-    if sess.target.abi == Abi::Fortanix
+    if sess.target.cfg_abi == CfgAbi::Fortanix
         || sess.target.os == Os::Linux
         || sess.target.os == Os::Fuchsia
         || sess.target.is_like_aix
         || sess.target.is_like_darwin && !sess.sanitizers().is_empty()
         || sess.target.os == Os::Windows
             && sess.target.env == Env::Gnu
-            && sess.target.abi == Abi::Llvm
+            && sess.target.cfg_abi == CfgAbi::Llvm
     {
         f(&sess.target_tlib_path.dir, false)?;
     }
@@ -224,7 +224,7 @@ impl<'tcx> Collector<'tcx> {
             let dll_imports = match attr.kind {
                 NativeLibKind::RawDylib { .. } => foreign_items
                     .iter()
-                    .map(|&child_item| {
+                    .filter_map(|&child_item| {
                         self.build_dll_import(
                             abi,
                             attr.import_name_type.map(|(import_name_type, _)| import_name_type),
@@ -363,6 +363,7 @@ impl<'tcx> Collector<'tcx> {
             self.tcx
                 .type_of(item)
                 .instantiate_identity()
+                .skip_norm_wip()
                 .fn_sig(self.tcx)
                 .inputs()
                 .map_bound(|slice| self.tcx.mk_type_list(slice)),
@@ -388,7 +389,7 @@ impl<'tcx> Collector<'tcx> {
         abi: ExternAbi,
         import_name_type: Option<PeImportNameType>,
         item: DefId,
-    ) -> DllImport {
+    ) -> Option<DllImport> {
         let span = self.tcx.def_span(item);
 
         // This `extern` block should have been checked for general ABI support before, but let's
@@ -408,8 +409,13 @@ impl<'tcx> Collector<'tcx> {
                 // `__stdcall` only applies on x86 and on non-variadic functions:
                 // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
                 ExternAbi::System { .. } => {
-                    let c_variadic =
-                        self.tcx.type_of(item).instantiate_identity().fn_sig(self.tcx).c_variadic();
+                    let c_variadic = self
+                        .tcx
+                        .type_of(item)
+                        .instantiate_identity()
+                        .skip_norm_wip()
+                        .fn_sig(self.tcx)
+                        .c_variadic();
 
                     if c_variadic {
                         DllCallingConvention::C
@@ -465,6 +471,8 @@ impl<'tcx> Collector<'tcx> {
             } else {
                 DllImportSymbolType::Static
             }
+        } else if def_kind == DefKind::ForeignTy {
+            return None;
         } else {
             bug!("Unexpected type for raw-dylib: {}", def_kind.descr(item));
         };
@@ -473,7 +481,7 @@ impl<'tcx> Collector<'tcx> {
             // We cannot determine the size of a function at compile time, but it shouldn't matter anyway.
             DllImportSymbolType::Function => rustc_abi::Size::ZERO,
             DllImportSymbolType::Static | DllImportSymbolType::ThreadLocal => {
-                let ty = self.tcx.type_of(item).instantiate_identity();
+                let ty = self.tcx.type_of(item).instantiate_identity().skip_norm_wip();
                 self.tcx
                     .layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(ty))
                     .ok()
@@ -482,6 +490,6 @@ impl<'tcx> Collector<'tcx> {
             }
         };
 
-        DllImport { name, import_name_type, calling_convention, span, symbol_type, size }
+        Some(DllImport { name, import_name_type, calling_convention, span, symbol_type, size })
     }
 }

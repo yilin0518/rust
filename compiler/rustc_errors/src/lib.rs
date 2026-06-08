@@ -36,8 +36,8 @@ pub use anstyle::{
 pub use codes::*;
 pub use decorate_diag::{BufferedEarlyLint, DecorateDiagCompat, LintBuffer};
 pub use diagnostic::{
-    BugAbort, Diag, DiagDecorator, DiagInner, DiagLocation, DiagStyledString, Diagnostic,
-    EmissionGuarantee, FatalAbort, StringPart, Subdiag, Subdiagnostic,
+    BugAbort, Diag, DiagCallback, DiagDecorator, DiagInner, DiagLocation, DiagStyledString,
+    Diagnostic, EmissionGuarantee, FatalAbort, StringPart, Subdiag, Subdiagnostic,
 };
 pub use diagnostic_impls::{
     DiagSymbolList, ElidedLifetimeInPathSubdiag, ExpectedLifetimeParameter,
@@ -77,6 +77,7 @@ mod diagnostic_impls;
 pub mod emitter;
 pub mod formatting;
 pub mod json;
+pub mod lints;
 mod lock;
 pub mod markdown;
 pub mod timings;
@@ -386,6 +387,7 @@ pub enum StashKey {
     /// it's a method call without parens. If later on in `hir_typeck` we find out that this is
     /// the case we suppress this message and we give a better suggestion.
     GenericInFieldExpr,
+    ReturnTypeNotation,
 }
 
 fn default_track_diagnostic<R>(diag: DiagInner, f: &mut dyn FnMut(DiagInner) -> R) -> R {

@@ -397,12 +397,7 @@ impl<'hir> PathSegment<'hir> {
     }
 
     pub fn args(&self) -> &GenericArgs<'hir> {
-        if let Some(ref args) = self.args {
-            args
-        } else {
-            const DUMMY: &GenericArgs<'_> = &GenericArgs::none();
-            DUMMY
-        }
+        if let Some(ref args) = self.args { args } else { GenericArgs::NONE }
     }
 }
 
@@ -643,14 +638,12 @@ pub struct GenericArgs<'hir> {
 }
 
 impl<'hir> GenericArgs<'hir> {
-    pub const fn none() -> Self {
-        Self {
-            args: &[],
-            constraints: &[],
-            parenthesized: GenericArgsParentheses::No,
-            span_ext: DUMMY_SP,
-        }
-    }
+    pub const NONE: &'hir GenericArgs<'hir> = &GenericArgs {
+        args: &[],
+        constraints: &[],
+        parenthesized: GenericArgsParentheses::No,
+        span_ext: DUMMY_SP,
+    };
 
     /// Obtain the list of input types and the output type if the generic arguments are parenthesized.
     ///
@@ -1264,6 +1257,8 @@ pub struct HashIgnoredAttrId {
     pub attr_id: AttrId,
 }
 
+/// Many functions on this type have their documentation in the [`AttributeExt`] trait,
+/// since they defer their implementation directly to that trait.
 #[derive(Clone, Debug, Encodable, Decodable, HashStable_Generic)]
 pub enum Attribute {
     /// A parsed built-in attribute.
@@ -1636,6 +1631,10 @@ pub struct OwnerInfo<'hir> {
 
     /// Lints delayed during ast lowering to be emitted
     /// after hir has completely built
+    ///
+    /// WARNING: The delayed lints are not hashed as a part of the `OwnerInfo`, and therefore
+    ///          should only be accessed in `eval_always` queries.
+    #[stable_hasher(ignore)]
     pub delayed_lints: DelayedLints,
 }
 
@@ -1665,19 +1664,6 @@ impl<'tcx> MaybeOwner<'tcx> {
     pub fn unwrap(self) -> &'tcx OwnerInfo<'tcx> {
         self.as_owner().unwrap_or_else(|| panic!("Not a HIR owner"))
     }
-}
-
-/// The top-level data structure that stores the entire contents of
-/// the crate currently being compiled.
-///
-/// For more details, see the [rustc dev guide].
-///
-/// [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/hir.html
-#[derive(Debug)]
-pub struct Crate<'hir> {
-    pub owners: IndexVec<LocalDefId, MaybeOwner<'hir>>,
-    // Only present when incr. comp. is enabled.
-    pub opt_hir_hash: Option<Fingerprint>,
 }
 
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
@@ -3778,10 +3764,19 @@ pub struct DelegationGenerics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, HashStable_Generic)]
-pub enum InferDelegationKind<'hir> {
+pub enum InferDelegationSig<'hir> {
     Input(usize),
     // Place generics info here, as we always specify output type for delegations.
     Output(&'hir DelegationGenerics),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, HashStable_Generic)]
+pub enum InferDelegation<'hir> {
+    /// Infer the type of this `DefId` through `tcx.type_of(def_id).instantiate_identity()`,
+    /// used for const types propagation.
+    DefId(DefId),
+    /// Used during signature inheritance, `DefId` corresponds to the signature function.
+    Sig(DefId, InferDelegationSig<'hir>),
 }
 
 /// The various kinds of types recognized by the compiler.
@@ -3793,7 +3788,7 @@ pub enum InferDelegationKind<'hir> {
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub enum TyKind<'hir, Unambig = ()> {
     /// Actual type should be inherited from `DefId` signature
-    InferDelegation(DefId, InferDelegationKind<'hir>),
+    InferDelegation(InferDelegation<'hir>),
     /// A variable length slice (i.e., `[T]`).
     Slice(&'hir Ty<'hir>),
     /// A fixed length array (i.e., `[T; n]`).
@@ -3926,6 +3921,117 @@ pub struct Param<'hir> {
     pub span: Span,
 }
 
+/// Contains the packed non-type fields of a function declaration.
+// FIXME(splat): add the splatted argument index as a u16
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Encodable, Decodable, HashStable_Generic)]
+pub struct FnDeclFlags {
+    /// Holds the c_variadic and lifetime_elision_allowed bitflags, and 3 bits for the `ImplicitSelfKind`.
+    flags: u8,
+}
+
+impl fmt::Debug for FnDeclFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_tuple("FnDeclFlags");
+        f.field(&format!("ImplicitSelfKind({:?})", self.implicit_self()));
+
+        if self.lifetime_elision_allowed() {
+            f.field(&"LifetimeElisionAllowed");
+        } else {
+            f.field(&"NoLifetimeElision");
+        };
+
+        if self.c_variadic() {
+            f.field(&"CVariadic");
+        };
+
+        f.finish()
+    }
+}
+
+impl FnDeclFlags {
+    /// Mask for the implicit self kind.
+    const IMPLICIT_SELF_MASK: u8 = 0b111;
+
+    /// Bitflag for a trailing C-style variadic argument.
+    const C_VARIADIC_FLAG: u8 = 1 << 3;
+
+    /// Bitflag for lifetime elision.
+    const LIFETIME_ELISION_ALLOWED_FLAG: u8 = 1 << 4;
+
+    /// Create a new FnDeclKind with no implicit self, no lifetime elision, and no C-style variadic argument.
+    /// To modify these flags, use the `set_*` methods, for readability.
+    // FIXME: use Default instead when that trait is const stable.
+    pub const fn default() -> Self {
+        Self { flags: 0 }
+            .set_implicit_self(ImplicitSelfKind::None)
+            .set_lifetime_elision_allowed(false)
+            .set_c_variadic(false)
+    }
+
+    /// Set the implicit self kind.
+    #[must_use = "this method does not modify the receiver"]
+    pub const fn set_implicit_self(mut self, implicit_self: ImplicitSelfKind) -> Self {
+        self.flags &= !Self::IMPLICIT_SELF_MASK;
+
+        match implicit_self {
+            ImplicitSelfKind::None => self.flags |= 0,
+            ImplicitSelfKind::Imm => self.flags |= 1,
+            ImplicitSelfKind::Mut => self.flags |= 2,
+            ImplicitSelfKind::RefImm => self.flags |= 3,
+            ImplicitSelfKind::RefMut => self.flags |= 4,
+        }
+
+        self
+    }
+
+    /// Set the C-style variadic argument flag.
+    #[must_use = "this method does not modify the receiver"]
+    pub const fn set_c_variadic(mut self, c_variadic: bool) -> Self {
+        if c_variadic {
+            self.flags |= Self::C_VARIADIC_FLAG;
+        } else {
+            self.flags &= !Self::C_VARIADIC_FLAG;
+        }
+
+        self
+    }
+
+    /// Set the lifetime elision allowed flag.
+    #[must_use = "this method does not modify the receiver"]
+    pub const fn set_lifetime_elision_allowed(mut self, allowed: bool) -> Self {
+        if allowed {
+            self.flags |= Self::LIFETIME_ELISION_ALLOWED_FLAG;
+        } else {
+            self.flags &= !Self::LIFETIME_ELISION_ALLOWED_FLAG;
+        }
+
+        self
+    }
+
+    /// Get the implicit self kind.
+    pub const fn implicit_self(self) -> ImplicitSelfKind {
+        match self.flags & Self::IMPLICIT_SELF_MASK {
+            0 => ImplicitSelfKind::None,
+            1 => ImplicitSelfKind::Imm,
+            2 => ImplicitSelfKind::Mut,
+            3 => ImplicitSelfKind::RefImm,
+            4 => ImplicitSelfKind::RefMut,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Do the function arguments end with a C-style variadic argument?
+    pub const fn c_variadic(self) -> bool {
+        self.flags & Self::C_VARIADIC_FLAG != 0
+    }
+
+    /// Is lifetime elision allowed?
+    pub const fn lifetime_elision_allowed(self) -> bool {
+        self.flags & Self::LIFETIME_ELISION_ALLOWED_FLAG != 0
+    }
+}
+
 /// Represents the header (not the body) of a function declaration.
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub struct FnDecl<'hir> {
@@ -3934,17 +4040,14 @@ pub struct FnDecl<'hir> {
     /// Additional argument data is stored in the function's [body](Body::params).
     pub inputs: &'hir [Ty<'hir>],
     pub output: FnRetTy<'hir>,
-    pub c_variadic: bool,
-    /// Does the function have an implicit self?
-    pub implicit_self: ImplicitSelfKind,
-    /// Is lifetime elision allowed.
-    pub lifetime_elision_allowed: bool,
+    /// The packed function declaration attributes.
+    pub fn_decl_kind: FnDeclFlags,
 }
 
 impl<'hir> FnDecl<'hir> {
     pub fn opt_delegation_sig_id(&self) -> Option<DefId> {
         if let FnRetTy::Return(ty) = self.output
-            && let TyKind::InferDelegation(sig_id, _) = ty.kind
+            && let TyKind::InferDelegation(InferDelegation::Sig(sig_id, _)) = ty.kind
         {
             return Some(sig_id);
         }
@@ -3953,13 +4056,33 @@ impl<'hir> FnDecl<'hir> {
 
     pub fn opt_delegation_generics(&self) -> Option<&'hir DelegationGenerics> {
         if let FnRetTy::Return(ty) = self.output
-            && let TyKind::InferDelegation(_, kind) = ty.kind
-            && let InferDelegationKind::Output(generics) = kind
+            && let TyKind::InferDelegation(InferDelegation::Sig(_, kind)) = ty.kind
+            && let InferDelegationSig::Output(generics) = kind
         {
             return Some(generics);
         }
 
         None
+    }
+
+    pub fn implicit_self(&self) -> ImplicitSelfKind {
+        self.fn_decl_kind.implicit_self()
+    }
+
+    pub fn c_variadic(&self) -> bool {
+        self.fn_decl_kind.c_variadic()
+    }
+
+    pub fn lifetime_elision_allowed(&self) -> bool {
+        self.fn_decl_kind.lifetime_elision_allowed()
+    }
+
+    pub fn dummy(span: Span) -> Self {
+        Self {
+            inputs: &[],
+            output: FnRetTy::DefaultReturn(span),
+            fn_decl_kind: FnDeclFlags::default().set_lifetime_elision_allowed(true),
+        }
     }
 }
 
@@ -4335,13 +4458,14 @@ impl<'hir> Item<'hir> {
                 Constness,
                 IsAuto,
                 Safety,
+                &'hir ImplRestriction<'hir>,
                 Ident,
                 &'hir Generics<'hir>,
                 GenericBounds<'hir>,
                 &'hir [TraitItemId]
             ),
-            ItemKind::Trait(constness, is_auto, safety, ident, generics, bounds, items),
-            (*constness, *is_auto, *safety, *ident, generics, bounds, items);
+            ItemKind::Trait(constness, is_auto, safety, impl_restriction, ident, generics, bounds, items),
+            (*constness, *is_auto, *safety, impl_restriction, *ident, generics, bounds, items);
 
         expect_trait_alias, (Constness, Ident, &'hir Generics<'hir>, GenericBounds<'hir>),
             ItemKind::TraitAlias(constness, ident, generics, bounds), (*constness, *ident, generics, bounds);
@@ -4408,6 +4532,20 @@ impl fmt::Display for Constness {
             Self::NotConst => "non-const",
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, HashStable_Generic)]
+pub struct ImplRestriction<'hir> {
+    pub kind: RestrictionKind<'hir>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, HashStable_Generic)]
+pub enum RestrictionKind<'hir> {
+    /// The restriction does not affect the item.
+    Unrestricted,
+    /// The restriction only applies outside of this path.
+    Restricted(&'hir Path<'hir, DefId>),
 }
 
 /// The actual safety specified in syntax. We may treat
@@ -4522,6 +4660,7 @@ pub enum ItemKind<'hir> {
         Constness,
         IsAuto,
         Safety,
+        &'hir ImplRestriction<'hir>,
         Ident,
         &'hir Generics<'hir>,
         GenericBounds<'hir>,
@@ -4572,7 +4711,7 @@ impl ItemKind<'_> {
             | ItemKind::Enum(ident, ..)
             | ItemKind::Struct(ident, ..)
             | ItemKind::Union(ident, ..)
-            | ItemKind::Trait(_, _, _, ident, ..)
+            | ItemKind::Trait(_, _, _, _, ident, ..)
             | ItemKind::TraitAlias(_, ident, ..) => Some(ident),
 
             ItemKind::Use(_, UseKind::Glob | UseKind::ListStem)
@@ -4590,7 +4729,7 @@ impl ItemKind<'_> {
             | ItemKind::Enum(_, generics, _)
             | ItemKind::Struct(_, generics, _)
             | ItemKind::Union(_, generics, _)
-            | ItemKind::Trait(_, _, _, _, generics, _, _)
+            | ItemKind::Trait(_, _, _, _, _, generics, _, _)
             | ItemKind::TraitAlias(_, _, generics, _)
             | ItemKind::Impl(Impl { generics, .. }) => generics,
             _ => return None,

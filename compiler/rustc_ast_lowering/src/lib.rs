@@ -39,26 +39,29 @@ use std::mem;
 use std::sync::Arc;
 
 use rustc_ast::node_id::NodeMap;
+use rustc_ast::visit::Visitor;
 use rustc_ast::{self as ast, *};
-use rustc_attr_parsing::{AttributeParser, Late, OmitDoc};
+use rustc_attr_parsing::{AttributeParser, EmitAttribute, Late, OmitDoc};
 use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::spawn;
+use rustc_data_structures::steal::Steal;
 use rustc_data_structures::tagged_ptr::TaggedRef;
 use rustc_errors::{DiagArgFromDisplay, DiagCtxtHandle};
 use rustc_hir::def::{DefKind, LifetimeRes, Namespace, PartialRes, PerNS, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId};
-use rustc_hir::definitions::{DefPathData, DisambiguatorState};
-use rustc_hir::lints::{AttributeLint, DelayedLint};
+use rustc_hir::definitions::PerParentDisambiguatorState;
+use rustc_hir::lints::{AttributeLint, DelayedLint, DynAttribute};
 use rustc_hir::{
     self as hir, AngleBrackets, ConstArg, GenericArg, HirId, ItemLocalMap, LifetimeSource,
     LifetimeSyntax, ParamName, Target, TraitCandidate, find_attr,
 };
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_macros::extension;
+use rustc_middle::hir::{self as mid_hir};
 use rustc_middle::span_bug;
-use rustc_middle::ty::{DelegationFnSig, DelegationInfo, ResolverAstLowering, TyCtxt};
+use rustc_middle::ty::{DelegationInfo, ResolverAstLowering, TyCtxt};
 use rustc_session::parse::add_feature_diagnostics;
 use rustc_span::symbol::{Ident, Symbol, kw, sym};
 use rustc_span::{DUMMY_SP, DesugaringKind, Span};
@@ -67,6 +70,7 @@ use thin_vec::ThinVec;
 use tracing::{debug, instrument, trace};
 
 use crate::errors::{AssocTyParentheses, AssocTyParenthesesSub, MisplacedImplTrait};
+use crate::item::Owners;
 
 macro_rules! arena_vec {
     ($this:expr; $($x:expr),*) => (
@@ -89,17 +93,8 @@ pub mod stability;
 
 struct LoweringContext<'a, 'hir, R> {
     tcx: TyCtxt<'hir>,
-
-    // During lowering of delegation we need to access AST of other functions
-    // in order to properly propagate generics, we could have done it at resolve
-    // stage, however it will require either to firstly identify functions that
-    // are being reused and store their generics, or to store generics of all functions
-    // in resolver. This approach helps with those problems, as functions that are reused
-    // will be in AST index.
-    ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
-
     resolver: &'a mut R,
-    disambiguator: DisambiguatorState,
+    disambiguator: PerParentDisambiguatorState,
 
     /// Used to allocate HIR nodes.
     arena: &'hir hir::Arena<'hir>,
@@ -159,17 +154,12 @@ struct LoweringContext<'a, 'hir, R> {
 }
 
 impl<'a, 'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'a, 'hir, R> {
-    fn new(
-        tcx: TyCtxt<'hir>,
-        ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
-        resolver: &'a mut R,
-    ) -> Self {
+    fn new(tcx: TyCtxt<'hir>, resolver: &'a mut R) -> Self {
         let registered_tools = tcx.registered_tools(()).iter().map(|x| x.name).collect();
         Self {
             tcx,
-            ast_index,
             resolver,
-            disambiguator: DisambiguatorState::new(),
+            disambiguator: Default::default(),
             arena: tcx.hir_arena,
 
             // HirId handling.
@@ -247,8 +237,85 @@ impl SpanLowerer {
     }
 }
 
-// LoweringContext now uses this trait for #153489, if #153489 is not merged,
-// feel free to do whatever you want with this trait.
+struct ResolverDelayedAstLowering<'a, 'tcx> {
+    node_id_to_def_id: NodeMap<LocalDefId>,
+    partial_res_map: NodeMap<PartialRes>,
+    next_node_id: NodeId,
+    base: &'a ResolverAstLowering<'tcx>,
+}
+
+// FIXME(fn_delegation): delegate this trait impl to `self.base`
+impl<'a, 'tcx> ResolverAstLoweringExt<'tcx> for ResolverDelayedAstLowering<'a, 'tcx> {
+    fn legacy_const_generic_args(&self, expr: &Expr, tcx: TyCtxt<'tcx>) -> Option<Vec<usize>> {
+        self.base.legacy_const_generic_args(expr, tcx)
+    }
+
+    fn get_partial_res(&self, id: NodeId) -> Option<PartialRes> {
+        self.partial_res_map.get(&id).copied().or_else(|| self.base.get_partial_res(id))
+    }
+
+    fn get_import_res(&self, id: NodeId) -> PerNS<Option<Res<NodeId>>> {
+        self.base.get_import_res(id)
+    }
+
+    fn get_label_res(&self, id: NodeId) -> Option<NodeId> {
+        self.base.get_label_res(id)
+    }
+
+    fn get_lifetime_res(&self, id: NodeId) -> Option<LifetimeRes> {
+        self.base.get_lifetime_res(id)
+    }
+
+    fn extra_lifetime_params(&self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)> {
+        self.base.extra_lifetime_params(id)
+    }
+
+    fn delegation_info(&self, id: LocalDefId) -> Option<&DelegationInfo> {
+        self.base.delegation_info(id)
+    }
+
+    fn opt_local_def_id(&self, id: NodeId) -> Option<LocalDefId> {
+        self.node_id_to_def_id.get(&id).copied().or_else(|| self.base.opt_local_def_id(id))
+    }
+
+    fn local_def_id(&self, id: NodeId) -> LocalDefId {
+        self.opt_local_def_id(id).expect("must have def_id")
+    }
+
+    fn lifetime_elision_allowed(&self, id: NodeId) -> bool {
+        self.base.lifetime_elision_allowed(id)
+    }
+
+    fn insert_new_def_id(&mut self, node_id: NodeId, def_id: LocalDefId) {
+        self.node_id_to_def_id.insert(node_id, def_id);
+    }
+
+    fn insert_partial_res(&mut self, node_id: NodeId, res: PartialRes) {
+        self.partial_res_map.insert(node_id, res);
+    }
+
+    fn trait_candidates(&self, node_id: NodeId) -> Option<&'tcx [hir::TraitCandidate<'tcx>]> {
+        self.base.trait_candidates(node_id)
+    }
+
+    #[inline]
+    fn next_node_id(&mut self) -> NodeId {
+        next_node_id(&mut self.next_node_id)
+    }
+
+    fn steal_or_create_disambiguator(&self, parent: LocalDefId) -> PerParentDisambiguatorState {
+        self.base.steal_or_create_disambiguator(parent)
+    }
+}
+
+fn next_node_id(current_id: &mut NodeId) -> NodeId {
+    let start = *current_id;
+    let next = start.as_u32().checked_add(1).expect("input too large; ran out of NodeIds");
+    *current_id = ast::NodeId::from_u32(next);
+
+    start
+}
+
 #[extension(trait ResolverAstLoweringExt<'tcx>)]
 impl<'tcx> ResolverAstLowering<'tcx> {
     fn legacy_const_generic_args(&self, expr: &Expr, tcx: TyCtxt<'tcx>) -> Option<Vec<usize>> {
@@ -309,10 +376,6 @@ impl<'tcx> ResolverAstLowering<'tcx> {
         self.extra_lifetime_params_map.get(&id).cloned().unwrap_or_default()
     }
 
-    fn delegation_fn_sig(&self, id: LocalDefId) -> Option<&DelegationFnSig> {
-        self.delegation_fn_sigs.get(&id)
-    }
-
     fn delegation_info(&self, id: LocalDefId) -> Option<&DelegationInfo> {
         self.delegation_infos.get(&id)
     }
@@ -343,11 +406,11 @@ impl<'tcx> ResolverAstLowering<'tcx> {
 
     #[inline]
     fn next_node_id(&mut self) -> NodeId {
-        let start = self.next_node_id;
-        let next = start.as_u32().checked_add(1).expect("input too large; ran out of NodeIds");
-        self.next_node_id = ast::NodeId::from_u32(next);
+        next_node_id(&mut self.next_node_id)
+    }
 
-        start
+    fn steal_or_create_disambiguator(&self, parent: LocalDefId) -> PerParentDisambiguatorState {
+        self.per_parent_disambiguators.get(&parent).map(|s| s.steal()).unwrap_or_default()
     }
 }
 
@@ -555,8 +618,7 @@ fn compute_hir_hash(
     })
 }
 
-pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
-    let sess = tcx.sess;
+pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> mid_hir::Crate<'_> {
     // Queries that borrow `resolver_for_lowering`.
     tcx.ensure_done().output_filenames(());
     tcx.ensure_done().early_lint_checks(());
@@ -574,26 +636,60 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
         tcx,
         resolver: &mut resolver,
         ast_index: &ast_index,
-        owners: &mut owners,
+        owners: Owners::IndexVec(&mut owners),
     };
 
+    let mut delayed_ids: FxIndexSet<LocalDefId> = Default::default();
+
     for def_id in ast_index.indices() {
-        lowerer.lower_node(def_id);
+        match &ast_index[def_id] {
+            AstOwner::Item(Item { kind: ItemKind::Delegation { .. }, .. })
+            | AstOwner::AssocItem(Item { kind: AssocItemKind::Delegation { .. }, .. }, _) => {
+                delayed_ids.insert(def_id);
+            }
+            _ => lowerer.lower_node(def_id),
+        };
     }
-
-    drop(ast_index);
-
-    // Drop AST to free memory. It can be expensive so try to drop it on a separate thread.
-    let prof = sess.prof.clone();
-    spawn(move || {
-        let _timer = prof.verbose_generic_activity("drop_ast");
-        drop(krate);
-    });
 
     // Don't hash unless necessary, because it's expensive.
     let opt_hir_hash =
         if tcx.needs_crate_hash() { Some(compute_hir_hash(tcx, &owners)) } else { None };
-    hir::Crate { owners, opt_hir_hash }
+
+    let delayed_resolver = Steal::new((resolver, krate));
+    mid_hir::Crate::new(owners, delayed_ids, delayed_resolver, opt_hir_hash)
+}
+
+/// Lowers an AST owner corresponding to `def_id`, now only delegations are lowered this way.
+pub fn lower_delayed_owner(tcx: TyCtxt<'_>, def_id: LocalDefId) {
+    let krate = tcx.hir_crate(());
+
+    let (resolver, krate) = &*krate.delayed_resolver.borrow();
+
+    // FIXME!!!(fn_delegation): make ast index lifetime same as resolver,
+    // as it is too bad to reindex whole crate on each delegation lowering.
+    let ast_index = index_crate(resolver, krate);
+
+    let mut resolver = ResolverDelayedAstLowering {
+        next_node_id: resolver.next_node_id,
+        partial_res_map: Default::default(),
+        node_id_to_def_id: Default::default(),
+        base: resolver,
+    };
+
+    let mut map = Default::default();
+
+    let mut lowerer = item::ItemLowerer {
+        tcx,
+        resolver: &mut resolver,
+        ast_index: &ast_index,
+        owners: Owners::Map(&mut map),
+    };
+
+    lowerer.lower_node(def_id);
+
+    for (child_def_id, owner) in map {
+        tcx.feed_delayed_owner(child_def_id, owner);
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -629,7 +725,6 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         node_id: ast::NodeId,
         name: Option<Symbol>,
         def_kind: DefKind,
-        def_path_data: DefPathData,
         span: Span,
     ) -> LocalDefId {
         let parent = self.current_hir_id_owner.def_id;
@@ -645,7 +740,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let def_id = self
             .tcx
             .at(span)
-            .create_def(parent, name, def_kind, Some(def_path_data), &mut self.disambiguator)
+            .create_def(parent, name, def_kind, None, &mut self.disambiguator)
             .def_id();
 
         debug!("create_def: def_id_to_node_id[{:?}] <-> {:?}", def_id, node_id);
@@ -686,6 +781,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
     ) {
         let owner_id = self.owner_id(owner);
 
+        let new_disambig = self.resolver.steal_or_create_disambiguator(owner_id.def_id);
+        let disambiguator = std::mem::replace(&mut self.disambiguator, new_disambig);
         let current_attrs = std::mem::take(&mut self.attrs);
         let current_bodies = std::mem::take(&mut self.bodies);
         let current_define_opaque = std::mem::take(&mut self.define_opaque);
@@ -720,6 +817,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         assert!(self.impl_trait_bounds.is_empty());
         let info = self.make_owner_info(item);
 
+        self.disambiguator = disambiguator;
         self.attrs = current_attrs;
         self.bodies = current_bodies;
         self.define_opaque = current_define_opaque;
@@ -759,14 +857,12 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let bodies = SortedMap::from_presorted_elements(bodies);
 
         // Don't hash unless necessary, because it's expensive.
-        let rustc_middle::hir::Hashes { opt_hash_including_bodies, attrs_hash, delayed_lints_hash } =
-            self.tcx.hash_owner_nodes(node, &bodies, &attrs, &delayed_lints, define_opaque);
+        let rustc_middle::hir::Hashes { opt_hash_including_bodies, attrs_hash } =
+            self.tcx.hash_owner_nodes(node, &bodies, &attrs, define_opaque);
         let num_nodes = self.item_local_id_counter.as_usize();
         let (nodes, parenting) = index::index_hir(self.tcx, node, &bodies, num_nodes);
         let nodes = hir::OwnerNodes { opt_hash_including_bodies, nodes, bodies };
         let attrs = hir::AttributeMap { map: attrs, opt_hash: attrs_hash, define_opaque };
-        let delayed_lints =
-            hir::lints::DelayedLints { lints: delayed_lints, opt_hash: delayed_lints_hash };
 
         self.arena.alloc(hir::OwnerInfo { nodes, parenting, attrs, trait_map, delayed_lints })
     }
@@ -927,7 +1023,6 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     param,
                     Some(kw::UnderscoreLifetime),
                     DefKind::LifetimeParam,
-                    DefPathData::DesugaredAnonymousLifetime,
                     ident.span,
                 );
                 debug!(?_def_id);
@@ -1079,13 +1174,23 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             target,
             OmitDoc::Lower,
             |s| l.lower(s),
-            |lint_id, span, kind| {
-                self.delayed_lints.push(DelayedLint::AttributeParsing(AttributeLint {
-                    lint_id,
-                    id: target_hir_id,
-                    span,
-                    kind,
-                }));
+            |lint_id, span, kind| match kind {
+                EmitAttribute::Static(attr_kind) => {
+                    self.delayed_lints.push(DelayedLint::AttributeParsing(AttributeLint {
+                        lint_id,
+                        id: target_hir_id,
+                        span,
+                        kind: attr_kind,
+                    }));
+                }
+                EmitAttribute::Dynamic(callback) => {
+                    self.delayed_lints.push(DelayedLint::Dynamic(DynAttribute {
+                        lint_id,
+                        id: target_hir_id,
+                        span,
+                        callback,
+                    }));
+                }
             },
         )
     }
@@ -1178,7 +1283,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             };
             gen_args_ctor.into_generic_args(self)
         } else {
-            self.arena.alloc(hir::GenericArgs::none())
+            hir::GenericArgs::NONE
         };
         let kind = match &constraint.kind {
             AssocItemConstraintKind::Equality { term } => {
@@ -1310,9 +1415,13 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 }
                 GenericArg::Type(self.lower_ty_alloc(ty, itctx).try_as_ambig_ty().unwrap())
             }
-            ast::GenericArg::Const(ct) => GenericArg::Const(
-                self.lower_anon_const_to_const_arg_and_alloc(ct).try_as_ambig_ct().unwrap(),
-            ),
+            ast::GenericArg::Const(ct) => {
+                let ct = self.lower_anon_const_to_const_arg_and_alloc(ct);
+                match ct.try_as_ambig_ct() {
+                    Some(ct) => GenericArg::Const(ct),
+                    None => GenericArg::Infer(hir::InferArg { hir_id: ct.hir_id, span: ct.span }),
+                }
+            }
         }
     }
 
@@ -1740,7 +1849,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         // as they are not explicit in HIR/Ty function signatures.
         // (instead, the `c_variadic` flag is set to `true`)
         let mut inputs = &decl.inputs[..];
-        if c_variadic {
+        if decl.c_variadic() {
             inputs = &inputs[..inputs.len() - 1];
         }
         let inputs = self.arena.alloc_from_iter(inputs.iter().map(|param| {
@@ -1803,12 +1912,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             },
         };
 
-        self.arena.alloc(hir::FnDecl {
-            inputs,
-            output,
-            c_variadic,
-            lifetime_elision_allowed: self.resolver.lifetime_elision_allowed(fn_node_id),
-            implicit_self: decl.inputs.get(0).map_or(hir::ImplicitSelfKind::None, |arg| {
+        let fn_decl_kind = hir::FnDeclFlags::default()
+            .set_implicit_self(decl.inputs.get(0).map_or(hir::ImplicitSelfKind::None, |arg| {
                 let is_mutable_pat = matches!(
                     arg.pat.kind,
                     PatKind::Ident(hir::BindingMode(_, Mutability::Mut), ..)
@@ -1830,8 +1935,11 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     }
                     _ => hir::ImplicitSelfKind::None,
                 }
-            }),
-        })
+            }))
+            .set_lifetime_elision_allowed(self.resolver.lifetime_elision_allowed(fn_node_id))
+            .set_c_variadic(c_variadic);
+
+        self.arena.alloc(hir::FnDecl { inputs, output, fn_decl_kind })
     }
 
     // Transforms `-> T` for `async fn` into `-> OpaqueTy { .. }`
@@ -2128,14 +2236,22 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 // since later compiler stages cannot handle them (and shouldn't need to be able to).
                 let default = default
                     .as_ref()
-                    .filter(|_| match source {
+                    .filter(|anon_const| match source {
                         hir::GenericParamSource::Generics => true,
                         hir::GenericParamSource::Binder => {
-                            self.dcx().emit_err(errors::GenericParamDefaultInBinder {
-                                span: param.span(),
-                            });
-
-                            false
+                            let err = errors::GenericParamDefaultInBinder { span: param.span() };
+                            if expr::WillCreateDefIdsVisitor
+                                .visit_expr(&anon_const.value)
+                                .is_break()
+                            {
+                                // FIXME(mgca): make this non-fatal once we have a better way
+                                // to handle nested items in anno const from binder
+                                // Issue: https://github.com/rust-lang/rust/issues/123629
+                                self.dcx().emit_fatal(err)
+                            } else {
+                                self.dcx().emit_err(err);
+                                false
+                            }
                         }
                     })
                     .map(|def| self.lower_anon_const_to_const_arg_and_alloc(def));
@@ -2404,13 +2520,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             // We're lowering a const argument that was originally thought to be a type argument,
             // so the def collector didn't create the def ahead of time. That's why we have to do
             // it here.
-            let def_id = self.create_def(
-                node_id,
-                None,
-                DefKind::AnonConst,
-                DefPathData::LateAnonConst,
-                span,
-            );
+            let def_id = self.create_def(node_id, None, DefKind::AnonConst, span);
             let hir_id = self.lower_node_id(node_id);
 
             let path_expr = Expr {
@@ -2472,12 +2582,17 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let span = self.lower_span(expr.span);
 
         let overly_complex_const = |this: &mut Self| {
-            let e = this.dcx().struct_span_err(
-                expr.span,
-                "complex const arguments must be placed inside of a `const` block",
-            );
+            let msg = "complex const arguments must be placed inside of a `const` block";
+            let e = if expr::WillCreateDefIdsVisitor.visit_expr(expr).is_break() {
+                // FIXME(mgca): make this non-fatal once we have a better way to handle
+                // nested items in const args
+                // Issue: https://github.com/rust-lang/rust/issues/154539
+                this.dcx().struct_span_fatal(expr.span, msg).emit()
+            } else {
+                this.dcx().struct_span_err(expr.span, msg).emit()
+            };
 
-            ConstArg { hir_id: this.next_id(), kind: hir::ConstArgKind::Error(e.emit()), span }
+            ConstArg { hir_id: this.next_id(), kind: hir::ConstArgKind::Error(e), span }
         };
 
         match &expr.kind {
@@ -2592,7 +2707,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 overly_complex_const(self)
             }
             ExprKind::Lit(literal) => {
-                let span = expr.span;
+                let span = self.lower_span(expr.span);
                 let literal = self.lower_lit(literal, span);
 
                 ConstArg {
@@ -2604,7 +2719,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             ExprKind::Unary(UnOp::Neg, inner_expr)
                 if let ExprKind::Lit(literal) = &inner_expr.kind =>
             {
-                let span = expr.span;
+                let span = self.lower_span(expr.span);
                 let literal = self.lower_lit(literal, span);
 
                 if !matches!(literal.node, LitKind::Int(..)) {

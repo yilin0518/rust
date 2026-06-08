@@ -50,7 +50,7 @@ use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
 use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt, Unnormalized};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config;
 use rustc_span::Span;
@@ -82,7 +82,7 @@ fn used_trait_imports(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &UnordSet<LocalDef
     &tcx.typeck(def_id).used_trait_imports
 }
 
-fn typeck<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx ty::TypeckResults<'tcx> {
+fn typeck_root<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx ty::TypeckResults<'tcx> {
     typeck_with_inspect(tcx, def_id, None)
 }
 
@@ -95,6 +95,13 @@ pub fn inspect_typeck<'tcx>(
     def_id: LocalDefId,
     inspect: ObligationInspector<'tcx>,
 ) -> &'tcx ty::TypeckResults<'tcx> {
+    // Closures' typeck results come from their outermost function,
+    // as they are part of the same "inference environment".
+    let typeck_root_def_id = tcx.typeck_root_def_id_local(def_id);
+    if typeck_root_def_id != def_id {
+        return tcx.typeck(typeck_root_def_id);
+    }
+
     typeck_with_inspect(tcx, def_id, Some(inspect))
 }
 
@@ -104,12 +111,7 @@ fn typeck_with_inspect<'tcx>(
     def_id: LocalDefId,
     inspector: Option<ObligationInspector<'tcx>>,
 ) -> &'tcx ty::TypeckResults<'tcx> {
-    // Closures' typeck results come from their outermost function,
-    // as they are part of the same "inference environment".
-    let typeck_root_def_id = tcx.typeck_root_def_id(def_id.to_def_id()).expect_local();
-    if typeck_root_def_id != def_id {
-        return tcx.typeck(typeck_root_def_id);
-    }
+    assert!(!tcx.is_typeck_child(def_id.to_def_id()));
 
     let id = tcx.local_def_id_to_hir_id(def_id);
     let node = tcx.hir_node(id);
@@ -142,7 +144,7 @@ fn typeck_with_inspect<'tcx>(
             // a suggestion later on.
             fcx.lowerer().lower_fn_ty(id, header.safety(), header.abi, decl, None, None)
         } else {
-            tcx.fn_sig(def_id).instantiate_identity()
+            tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip()
         };
 
         check_abi(tcx, id, span, fn_sig.abi());
@@ -166,7 +168,7 @@ fn typeck_with_inspect<'tcx>(
                 .inputs_and_output
                 .iter()
                 .enumerate()
-                .map(|(idx, ty)| fcx.normalize(arg_span(idx), ty)),
+                .map(|(idx, ty)| fcx.normalize(arg_span(idx), Unnormalized::new_wip(ty))),
         );
 
         if tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::NAKED) {
@@ -186,12 +188,12 @@ fn typeck_with_inspect<'tcx>(
             // a suggestion later on.
             fcx.lowerer().lower_ty(ty)
         } else {
-            tcx.type_of(def_id).instantiate_identity()
+            tcx.type_of(def_id).instantiate_identity().skip_norm_wip()
         };
 
         loops::check(tcx, def_id, body);
 
-        let expected_type = fcx.normalize(body.value.span, expected_type);
+        let expected_type = fcx.normalize(body.value.span, Unnormalized::new_wip(expected_type));
 
         let wf_code = ObligationCauseCode::WellFormed(Some(WellFormedLoc::Ty(def_id)));
         fcx.register_wf_obligation(expected_type.into(), body.value.span, wf_code);
@@ -242,7 +244,7 @@ fn typeck_with_inspect<'tcx>(
     assert!(fcx.deferred_call_resolutions.borrow().is_empty());
 
     for (ty, span, code) in fcx.deferred_sized_obligations.borrow_mut().drain(..) {
-        let ty = fcx.normalize(span, ty);
+        let ty = fcx.normalize(span, Unnormalized::new_wip(ty));
         fcx.require_type_is_sized(ty, span, code);
     }
 
@@ -406,14 +408,15 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
             && let ty::AssocContainer::TraitImpl(Ok(trait_item_def_id)) = item.container
         {
             let impl_def_id = item.container_id(tcx);
-            let impl_trait_ref = tcx.impl_trait_ref(impl_def_id).instantiate_identity();
+            let impl_trait_ref =
+                tcx.impl_trait_ref(impl_def_id).instantiate_identity().skip_norm_wip();
             let args = ty::GenericArgs::identity_for_item(tcx, def_id).rebase_onto(
                 tcx,
                 impl_def_id,
                 impl_trait_ref.args,
             );
             tcx.check_args_compatible(trait_item_def_id, args)
-                .then(|| tcx.type_of(trait_item_def_id).instantiate(tcx, args))
+                .then(|| tcx.type_of(trait_item_def_id).instantiate(tcx, args).skip_norm_wip())
         } else {
             Some(fcx.next_ty_var(span))
         }
@@ -660,7 +663,7 @@ fn fatally_break_rust(tcx: TyCtxt<'_>, span: Span) -> ! {
 pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         method_autoderef_steps: method::probe::method_autoderef_steps,
-        typeck,
+        typeck_root,
         used_trait_imports,
         check_transmutes: intrinsicck::check_transmutes,
         ..*providers

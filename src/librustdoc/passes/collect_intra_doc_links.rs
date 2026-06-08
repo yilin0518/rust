@@ -311,7 +311,7 @@ impl<'tcx> LinkCollector<'_, 'tcx> {
 
         match ty_res {
             Res::Def(DefKind::Enum | DefKind::TyAlias, did) => {
-                match tcx.type_of(did).instantiate_identity().kind() {
+                match tcx.type_of(did).instantiate_identity().skip_norm_wip().kind() {
                     ty::Adt(def, _) if def.is_enum() => {
                         if let Some(variant) =
                             def.variants().iter().find(|v| v.name == variant_name)
@@ -509,7 +509,9 @@ fn resolve_self_ty<'tcx>(
     };
 
     match tcx.def_kind(self_id) {
-        DefKind::Impl { .. } => ty_to_res(tcx, tcx.type_of(self_id).instantiate_identity()),
+        DefKind::Impl { .. } => {
+            ty_to_res(tcx, tcx.type_of(self_id).instantiate_identity().skip_norm_wip())
+        }
         DefKind::Use => None,
         def_kind => Some(Res::Def(def_kind, self_id)),
     }
@@ -606,7 +608,8 @@ fn resolve_associated_item<'tcx>(
             // Resolve the link on the type the alias points to.
             // FIXME: if the associated item is defined directly on the type alias,
             // it will show up on its documentation page, we should link there instead.
-            let Some(aliased_res) = ty_to_res(tcx, tcx.type_of(alias_did).instantiate_identity())
+            let Some(aliased_res) =
+                ty_to_res(tcx, tcx.type_of(alias_did).instantiate_identity().skip_norm_wip())
             else {
                 return vec![];
             };
@@ -686,7 +689,7 @@ fn resolve_assoc_on_adt<'tcx>(
 ) -> Vec<(Res, DefId)> {
     debug!("looking for associated item named {item_ident} for item {adt_def_id:?}");
     let root_res = Res::from_def_id(tcx, adt_def_id);
-    let adt_ty = tcx.type_of(adt_def_id).instantiate_identity();
+    let adt_ty = tcx.type_of(adt_def_id).instantiate_identity().skip_norm_wip();
     let adt_def = adt_ty.ty_adt_def().expect("must be ADT");
     // Checks if item_name is a variant of the `SomeItem` enum
     if ns == TypeNS && adt_def.is_enum() {
@@ -747,7 +750,7 @@ fn resolve_assoc_on_simple_type<'tcx>(
     // Although having both would be ambiguous, use impl version for compatibility's sake.
     // To handle that properly resolve() would have to support
     // something like [`ambi_fn`](<SomeStruct as SomeTrait>::ambi_fn)
-    let ty = tcx.type_of(ty_def_id).instantiate_identity();
+    let ty = tcx.type_of(ty_def_id).instantiate_identity().skip_norm_wip();
     let trait_assoc_items = resolve_associated_trait_item(ty, module_id, item_ident, ns, tcx)
         .into_iter()
         .map(|item| (root_res, item.def_id))
@@ -1067,17 +1070,27 @@ impl LinkCollector<'_, '_> {
     #[instrument(level = "debug", skip_all)]
     fn resolve_links(&mut self, item: &Item) {
         let tcx = self.cx.tcx;
-        if !self.cx.document_private()
-            && let Some(def_id) = item.item_id.as_def_id()
-            && let Some(def_id) = def_id.as_local()
-            && !tcx.effective_visibilities(()).is_exported(def_id)
-            && !has_primitive_or_keyword_or_attribute_docs(&item.attrs.other_attrs)
+        let document_private = self.cx.document_private();
+        let effective_visibilities = tcx.effective_visibilities(());
+        let should_skip_link_resolution = |item_id: DefId| {
+            !document_private
+                && item_id
+                    .as_local()
+                    .is_some_and(|local_def_id| !effective_visibilities.is_exported(local_def_id))
+                && !has_primitive_or_keyword_or_attribute_docs(&item.attrs.other_attrs)
+        };
+
+        if let Some(def_id) = item.item_id.as_def_id()
+            && should_skip_link_resolution(def_id)
         {
             // Skip link resolution for non-exported items.
             return;
         }
 
-        let mut insert_links = |item_id, doc: &str| {
+        let mut try_insert_links = |item_id, doc: &str| {
+            if should_skip_link_resolution(item_id) {
+                return;
+            }
             let module_id = match tcx.def_kind(item_id) {
                 DefKind::Mod if item.inner_docs(tcx) => item_id,
                 _ => find_nearest_parent_module(tcx, item_id).unwrap(),
@@ -1108,7 +1121,7 @@ impl LinkCollector<'_, '_> {
             // NOTE: if there are links that start in one crate and end in another, this will not resolve them.
             // This is a degenerate case and it's not supported by rustdoc.
             let item_id = item_id.unwrap_or_else(|| item.item_id.expect_def_id());
-            insert_links(item_id, &doc)
+            try_insert_links(item_id, &doc)
         }
 
         // Also resolve links in the note text of `#[deprecated]`.
@@ -1137,7 +1150,7 @@ impl LinkCollector<'_, '_> {
             } else {
                 item.item_id.expect_def_id()
             };
-            insert_links(item_id, note)
+            try_insert_links(item_id, note)
         }
     }
 
@@ -2111,7 +2124,8 @@ fn resolution_failure(
                         Res::Primitive(_) => None,
                     };
                     let is_struct_variant = |did| {
-                        if let ty::Adt(def, _) = tcx.type_of(did).instantiate_identity().kind()
+                        if let ty::Adt(def, _) =
+                            tcx.type_of(did).instantiate_identity().skip_norm_wip().kind()
                             && def.is_enum()
                             && let Some(variant) =
                                 def.variants().iter().find(|v| v.name == res.name(tcx))

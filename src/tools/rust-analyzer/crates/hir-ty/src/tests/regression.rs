@@ -2754,6 +2754,7 @@ where
             664..680 'filter...ter_fn': dyn Fn(&'? T) -> bool + 'static
             691..698 'loop {}': !
             696..698 '{}': ()
+            512..513 'N': usize
         "#]],
     );
 }
@@ -2837,6 +2838,21 @@ where
 fn wrapped_abs<T: SelfAbs<Output = T>>(v: T) -> T {
     v.abs()
 }
+    "#,
+    );
+}
+
+#[test]
+fn regression_21899() {
+    check_no_mismatches(
+        r#"
+trait B where
+    Self::T: B,
+{
+    type T;
+}
+
+fn foo<T: B>(v: T::T) {}
     "#,
     );
 }

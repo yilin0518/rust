@@ -68,6 +68,8 @@ ENV \
 
 WORKDIR /build
 COPY scripts/musl.sh /build
+COPY scripts/musl-cve-2026-6042.diff /build/
+COPY scripts/musl-cve-2026-40200.diff /build/
 RUN env \
     CC=arm-linux-gnueabi-gcc-9 CFLAGS="-march=armv7-a" \
     CXX=arm-linux-gnueabi-g++-9 CXXFLAGS="-march=armv7-a" \
@@ -124,6 +126,8 @@ ENV TARGETS=$TARGETS,x86_64-unknown-uefi
 ENV TARGETS=$TARGETS,riscv64gc-unknown-linux-musl
 
 ENV TARGETS_SANITIZERS=x86_64-unknown-linux-gnuasan
+ENV TARGETS_SANITIZERS=$TARGETS_SANITIZERS,x86_64-unknown-linux-gnumsan
+ENV TARGETS_SANITIZERS=$TARGETS_SANITIZERS,x86_64-unknown-linux-gnutsan
 
 # As per https://bugs.launchpad.net/ubuntu/+source/gcc-defaults/+bug/1300211
 # we need asm in the search path for gcc-9 (for gnux32) but not in the search path of the

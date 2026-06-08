@@ -183,15 +183,14 @@ pub(crate) fn run_in_thread_pool_with_globals<
     use std::process;
 
     use rustc_data_structures::defer;
-    use rustc_data_structures::sync::FromDyn;
     use rustc_middle::ty::tls;
-    use rustc_query_impl::break_query_cycles;
+    use rustc_query_impl::break_query_cycle;
 
     let thread_stack_size = init_stack_size(thread_builder_diag);
 
     let registry = sync::Registry::new(std::num::NonZero::new(threads).unwrap());
 
-    if !sync::is_dyn_thread_safe() {
+    let Some(proof) = sync::check_dyn_thread_safe() else {
         return run_in_thread_with_globals(
             thread_stack_size,
             edition,
@@ -204,9 +203,9 @@ pub(crate) fn run_in_thread_pool_with_globals<
                 f(current_gcx, jobserver_proxy)
             },
         );
-    }
+    };
 
-    let current_gcx = FromDyn::from(CurrentGcx::new());
+    let current_gcx = proof.derive(CurrentGcx::new());
     let current_gcx2 = current_gcx.clone();
 
     let proxy = Proxy::new();
@@ -261,7 +260,7 @@ internal compiler error: query cycle handler thread panicked, aborting process";
                                         )
                                     },
                                 );
-                                break_query_cycles(job_map, &registry);
+                                break_query_cycle(job_map, &registry);
                             })
                         })
                     });
@@ -278,7 +277,7 @@ internal compiler error: query cycle handler thread panicked, aborting process";
     // `Send` in the parallel compiler.
     rustc_span::create_session_globals_then(edition, extra_symbols, Some(sm_inputs), || {
         rustc_span::with_session_globals(|session_globals| {
-            let session_globals = FromDyn::from(session_globals);
+            let session_globals = proof.derive(session_globals);
             builder
                 .build_scoped(
                     // Initialize each new worker thread when created.

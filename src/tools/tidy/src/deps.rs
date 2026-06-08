@@ -504,6 +504,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "zerotrie",
     "zerovec",
     "zerovec-derive",
+    "zlib-rs",
     // tidy-alphabetical-end
 ];
 
@@ -538,7 +539,8 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "shlex",
     "unwinding",
     "vex-sdk",
-    "wasi",
+    "wasip1",
+    "wasip2",
     "windows-link",
     "windows-sys",
     "windows-targets",
@@ -582,7 +584,7 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "cranelift-srcgen",
     "crc32fast",
     "equivalent",
-    "fallible-iterator",
+    "fnv",
     "foldhash",
     "gimli",
     "hashbrown",
@@ -608,8 +610,8 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "syn",
     "target-lexicon",
     "unicode-ident",
+    "wasmtime-internal-core",
     "wasmtime-internal-jit-icache-coherence",
-    "wasmtime-internal-math",
     "windows-link",
     "windows-sys",
     "windows-targets",
@@ -880,10 +882,7 @@ fn check_runtime_no_duplicate_dependencies(metadata: &Metadata, check: &mut Runn
             continue;
         }
 
-        // Skip the `wasi` crate here which the standard library explicitly
-        // depends on two version of (one for the `wasm32-wasip1` target and
-        // another for the `wasm32-wasip2` target).
-        if pkg.name.to_string() != "wasi" && !seen_pkgs.insert(&*pkg.name) {
+        if !seen_pkgs.insert(&*pkg.name) {
             check.error(format!(
                 "duplicate package `{}` is not allowed for the standard library",
                 pkg.name

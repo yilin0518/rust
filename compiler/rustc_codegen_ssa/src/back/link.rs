@@ -47,7 +47,7 @@ use rustc_session::{Session, filesearch};
 use rustc_span::Symbol;
 use rustc_target::spec::crt_objects::CrtObjects;
 use rustc_target::spec::{
-    Abi, BinaryFormat, Cc, Env, LinkOutputKind, LinkSelfContainedComponents,
+    BinaryFormat, Cc, CfgAbi, Env, LinkOutputKind, LinkSelfContainedComponents,
     LinkSelfContainedDefault, LinkerFeatures, LinkerFlavor, LinkerFlavorCli, Lld, Os, RelocModel,
     RelroLevel, SanitizerSet, SplitDebuginfo,
 };
@@ -1917,7 +1917,7 @@ fn self_contained_components(
                 LinkSelfContainedDefault::InferredForMusl => sess.crt_static(Some(crate_type)),
                 LinkSelfContainedDefault::InferredForMingw => {
                     sess.host == sess.target
-                        && sess.target.abi != Abi::Uwp
+                        && sess.target.cfg_abi != CfgAbi::Uwp
                         && detect_self_contained_mingw(sess, linker)
                 }
             }
@@ -2767,6 +2767,10 @@ fn add_order_independent_options(
         cmd.pgo_gen();
     }
 
+    if sess.opts.unstable_opts.instrument_mcount {
+        cmd.enable_profiling();
+    }
+
     if sess.opts.cg.control_flow_guard != CFGuard::Disabled {
         cmd.control_flow_guard();
     }
@@ -2968,9 +2972,11 @@ fn add_upstream_rust_crates(
         // We must always link crates `compiler_builtins` and `profiler_builtins` statically.
         // Even if they were already included into a dylib
         // (e.g. `libstd` when `-C prefer-dynamic` is used).
+        // HACK: `dependency_formats` can report `profiler_builtins` as `NotLinked`.
+        // See the comment in inject_profiler_runtime for why this is the case.
         let linkage = data[cnum];
         let link_static_crate = linkage == Linkage::Static
-            || linkage == Linkage::IncludedFromDylib
+            || (linkage == Linkage::IncludedFromDylib || linkage == Linkage::NotLinked)
                 && (crate_info.compiler_builtins == Some(cnum)
                     || crate_info.profiler_runtime == Some(cnum));
 

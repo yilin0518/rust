@@ -80,8 +80,7 @@ See [Controlling pass/fail expectations](ui.md#controlling-passfail-expectations
 | `run-fail-or-crash`         | Program must `run-fail` or `run-crash`      | `ui`                                      | N/A             |
 | `ignore-pass`               | Ignore `--pass` flag                        | `ui`, `crashes`, `codegen`, `incremental` | N/A             |
 | `dont-check-failure-status` | Don't check exact failure status (i.e. `1`) | `ui`, `incremental`                       | N/A             |
-| `failure-status`            | Check                                       | `ui`, `crashes`                           | Any `u16`       |
-| `should-ice`                | Check failure status is `101`               | `coverage`, `incremental`                 | N/A             |
+| `failure-status`            | On failure, the compiler must exit with this status code. To expect an ICE, use `//@ failure-status: 101`. | `ui`, `crashes`, `incremental`            | Any `u16`       |
 | `should-fail`               | Compiletest self-test                       | All                                       | N/A             |
 
 ### Controlling output snapshots and normalizations
@@ -107,7 +106,7 @@ comparison](ui.md#output-comparison) and [Rustfix tests](ui.md#rustfix-tests) fo
 | `exec-env`                        | Env var to set when executing a test                                                                                     | `ui`, `crashes`                              | `<KEY>=<VALUE>`                                                                         |
 | `unset-exec-env`                  | Env var to unset when executing a test                                                                                   | `ui`, `crashes`                              | Any env var name                                                                        |
 | `stderr-per-bitwidth`             | Generate a stderr snapshot for each bitwidth                                                                             | `ui`                                         | N/A                                                                                     |
-| `forbid-output`                   | A pattern which must not appear in stderr/`cfail` output                                                                 | `ui`, `incremental`                          | Regex pattern                                                                           |
+| `forbid-output`                   | Check that compile/run output does not contain a specific string                                                         | `ui`, `incremental`                          | String                                                                                  |
 | `run-flags`                       | Flags passed to the test executable                                                                                      | `ui`                                         | Arbitrary flags                                                                         |
 | `known-bug`                       | No error annotation needed due to known bug                                                                              | `ui`, `crashes`, `incremental`               | Issue number `#123456`                                                                  |
 | `compare-output-by-lines`         | Compare the output by lines, rather than as a single string                                                              | All                                          | N/A                                                                                     |
@@ -316,9 +315,7 @@ See [Pretty-printer](compiletest.md#pretty-printer-tests).
 
 - `no-auto-check-cfg` — disable auto check-cfg (only for `--check-cfg` tests)
 - [`revisions`](compiletest.md#revisions) — compile multiple times
--[`forbid-output`](compiletest.md#incremental-tests) — incremental cfail rejects
-      output pattern
-- [`should-ice`](compiletest.md#incremental-tests) — incremental cfail should ICE
+- [`forbid-output`](compiletest.md#incremental-tests) — check that output does not contain a specified string
 - [`reference`] — an annotation linking to a rule in the reference
 - `disable-gdb-pretty-printers` — disable gdb pretty printers for debuginfo tests
 

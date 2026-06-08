@@ -262,16 +262,15 @@
 //! [`with_addr`] method:
 //!
 //! ```text
-//!     /// Creates a new pointer with the given address.
-//!     ///
-//!     /// This performs the same operation as an `addr as ptr` cast, but copies
-//!     /// the *provenance* of `self` to the new pointer.
-//!     /// This allows us to dynamically preserve and propagate this important
-//!     /// information in a way that is otherwise impossible with a unary cast.
-//!     ///
-//!     /// This is equivalent to using `wrapping_offset` to offset `self` to the
-//!     /// given address, and therefore has all the same capabilities and restrictions.
-//!     pub fn with_addr(self, addr: usize) -> Self;
+//! /// Creates a new pointer with the given address and the provenance  of `self`.
+//! ///
+//! /// This is similar to a `addr as *const T` cast,
+//! /// but copies the provenance of `self` to the new pointer.
+//! /// This avoids the inherent ambiguity of the unary cast.
+//! ///
+//! /// This is equivalent to using `wrapping_offset` to offset `self` to the given address,
+//! /// and therefore has all the same capabilities and restrictions.
+//! pub fn with_addr(self, addr: usize) -> Self;
 //! ```
 //!
 //! So you're still able to drop down to the address representation and do whatever
@@ -412,9 +411,10 @@ use crate::mem::{self, MaybeUninit, SizedTypeProperties};
 use crate::num::NonZero;
 use crate::{fmt, hash, intrinsics, ub_checks};
 
-mod alignment;
 #[unstable(feature = "ptr_alignment_type", issue = "102070")]
-pub use alignment::Alignment;
+#[deprecated(since = "1.96.0", note = "moved from `ptr` to `mem`")]
+/// Deprecated re-export of [mem::Alignment].
+pub type Alignment = mem::Alignment;
 
 mod metadata;
 #[unstable(feature = "ptr_metadata", issue = "81513")]

@@ -16,7 +16,7 @@ use rustc_codegen_ssa::traits::{BaseTypeCodegenMethods, BuilderMethods};
 use rustc_hir as hir;
 use rustc_middle::mir::BinOp;
 use rustc_middle::ty::layout::HasTyCtxt;
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::ty::{self, Ty, Unnormalized};
 use rustc_span::{Span, Symbol, sym};
 
 use crate::builder::Builder;
@@ -539,7 +539,10 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
         match *in_elem.kind() {
             ty::RawPtr(p_ty, _) => {
                 let metadata = p_ty.ptr_metadata_ty(bx.tcx, |ty| {
-                    bx.tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), ty)
+                    bx.tcx.normalize_erasing_regions(
+                        ty::TypingEnv::fully_monomorphized(),
+                        Unnormalized::new_wip(ty),
+                    )
                 });
                 require!(
                     metadata.is_unit(),
@@ -553,7 +556,10 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
         match *out_elem.kind() {
             ty::RawPtr(p_ty, _) => {
                 let metadata = p_ty.ptr_metadata_ty(bx.tcx, |ty| {
-                    bx.tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), ty)
+                    bx.tcx.normalize_erasing_regions(
+                        ty::TypingEnv::fully_monomorphized(),
+                        Unnormalized::new_wip(ty),
+                    )
                 });
                 require!(
                     metadata.is_unit(),
@@ -811,7 +817,7 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
             }};
         }
         let ty::Float(ref f) = *in_elem.kind() else {
-            return_error!(InvalidMonomorphization::FloatingPointType { span, name, in_ty });
+            return_error!(InvalidMonomorphization::BasicFloatType { span, name, ty: in_ty });
         };
         let elem_ty = bx.cx.type_float_from_ty(*f);
         let (elem_ty_str, elem_ty, cast_type) = match f.bit_width() {
@@ -1222,8 +1228,8 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
         simd_and: Uint, Int => and;
         simd_or: Uint, Int => or; // FIXME(antoyo): calling `or` might not work on vectors.
         simd_xor: Uint, Int => xor;
-        simd_fmin: Float => vector_fmin;
-        simd_fmax: Float => vector_fmax;
+        simd_minimum_number_nsz: Float => vector_minimum_number_nsz;
+        simd_maximum_number_nsz: Float => vector_maximum_number_nsz;
     }
 
     macro_rules! arith_unary {
